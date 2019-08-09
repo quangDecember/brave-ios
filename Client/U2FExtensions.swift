@@ -85,7 +85,11 @@ class U2FExtensions: NSObject {
     fileprivate var fidoSignRequests: [Int: [FIDOSignRequest]] = [:]
     
     fileprivate static var observationContext = 0
-    fileprivate var popup: AlertPopupView
+    fileprivate var touchKeyPopup: AlertPopupView
+    fileprivate var insertKeyPopup: AlertPopupView
+    fileprivate var pinVerificationPopup: AlertPopupView
+    
+    fileprivate var u2fActive = false
     fileprivate var currentMessageType = U2FMessageType.None
     fileprivate var currentHandle = -1
     fileprivate var currentTabId = ""
@@ -132,27 +136,30 @@ class U2FExtensions: NSObject {
             observeKeyStateUpdates = true
         }
         
-        popup = AlertPopupView(image: #imageLiteral(resourceName: "browser_lock_popup"), title: Strings.touchKeyTitle, message: Strings.touchKeyMessage)
+        touchKeyPopup = AlertPopupView(image: #imageLiteral(resourceName: "browser_lock_popup"), title: Strings.keyTitle, message: Strings.touchKeyMessage)
+        insertKeyPopup = AlertPopupView(image: #imageLiteral(resourceName: "browser_lock_popup"), title: Strings.keyTitle, message: Strings.insertKeyMessage)
+        pinVerificationPopup = AlertPopupView(image: #imageLiteral(resourceName: "browser_lock_popup"), title: Strings.pinLabel, message: Strings.pinTitle, inputType: .default, secureInput: true, inputPlaceholder: Strings.pinPlaceholder)
         super.init()
         
-        popup.addButton(title: Strings.touchKeyCancel) { [weak self] in
+        touchKeyPopup.addButton(title: Strings.keyCancel) { [weak self] in
             guard let self = self else {
                 return .flyDown
             }
-            let handle = self.currentHandle
-            switch self.currentMessageType {
-                case .FIDO2Create:
-                    self.sendFIDO2RegistrationError(handle: handle)
-                case .FIDO2Get:
-                    self.sendFIDO2AuthenticationError(handle: handle)
-                case.FIDORegister:
-                    self.sendFIDORegistrationError(handle: handle, requestId: self.requestId[handle] ?? -1, errorCode: U2FErrorCodes.other_error)
-                case .FIDOSign:
-                    self.sendFIDOAuthenticationError(handle: handle, requestId: self.requestId[handle] ?? -1, errorCode: U2FErrorCodes.other_error)
-                case .FIDOLowLevel, .None:
-                    break
+            return self.handleCancelButton()
+        }
+        
+        insertKeyPopup.addButton(title: Strings.keyCancel) { [weak self] in
+            guard let self = self else {
+                return .flyDown
             }
-            return .flyDown
+            return self.handleCancelButton()
+        }
+        
+        pinVerificationPopup.addButton(title: Strings.keyCancel) { [weak self] in
+            guard let self = self else {
+                return .flyDown
+            }
+            return self.handleCancelButton()
         }
         
         // Make sure the session is started
@@ -164,6 +171,24 @@ class U2FExtensions: NSObject {
         observeKeyStateUpdates = false
     }
     
+    private func handleCancelButton() -> PopupViewDismissType {
+        let handle = self.currentHandle
+        cleanupPinVerificationPopup()
+        switch self.currentMessageType {
+            case .FIDO2Create:
+                self.sendFIDO2RegistrationError(handle: handle)
+            case .FIDO2Get:
+                self.sendFIDO2AuthenticationError(handle: handle)
+            case.FIDORegister:
+                self.sendFIDORegistrationError(handle: handle, requestId: self.requestId[handle] ?? -1, errorCode: U2FErrorCodes.other_error)
+            case .FIDOSign:
+                self.sendFIDOAuthenticationError(handle: handle, requestId: self.requestId[handle] ?? -1, errorCode: U2FErrorCodes.other_error)
+            case .FIDOLowLevel, .None:
+                break
+        }
+        return .flyDown
+    }
+
     private func validateURL(string: String?) -> Bool {
         let regEx = "((https|http)://)((\\w|-)+)(([.]|[/])((\\w|-)+))+"
         let predicate = NSPredicate(format: "SELF MATCHES %@", argumentArray: [regEx])
@@ -403,6 +428,7 @@ class U2FExtensions: NSObject {
             guard let self = self else {
                 return
             }
+            self.cleanupPinVerificationPopup()
             if error == true {
                 self.sendFIDO2RegistrationError(handle: handle)
                 return
@@ -430,6 +456,7 @@ class U2FExtensions: NSObject {
         }
         fido2RegHandles.remove(at: index)
         fido2RegisterRequest.removeValue(forKey: handle)
+        u2fActive = false
     }
     
     // FIDO2 Authentication
@@ -577,6 +604,7 @@ class U2FExtensions: NSObject {
             guard let self = self else {
                 return
             }
+            self.cleanupPinVerificationPopup()
             if error == true {
                 self.sendFIDO2AuthenticationError(handle: handle)
                 return
@@ -597,6 +625,14 @@ class U2FExtensions: NSObject {
         }) }
     }
     
+    // This modal is presented when FIDO/FIDO2 APIs are waiting for the security key
+    private func presentInsertKeyModal() {
+        let currentURL = self.tab?.url?.host ?? ""
+        insertKeyPopup.updateTitle(title: Strings.keyTitle + currentURL)
+        insertKeyPopup.showWithType(showType: .flyUp)
+    }
+    
+    // This modal is presented when the key bootstrap is complete
     private func presentInteractWithKeyModal() {
         observeSessionStateUpdates = false
         observeKeyStateUpdates = false
@@ -615,42 +651,54 @@ class U2FExtensions: NSObject {
         
         if tab?.id == currentTabId && (fido2Service.keyState == .touchKey || u2fService.keyState == .YKFKeyU2FServiceKeyStateTouchKey) {
             let currentURL = self.tab?.url?.host ?? ""
-            popup.updateTitle(title: Strings.touchKeyTitle + currentURL)
-            popup.showWithType(showType: .flyUp)
+            touchKeyPopup.updateTitle(title: Strings.keyTitle + currentURL)
+            touchKeyPopup.showWithType(showType: .flyUp)
             return
         }
-        popup.dismissWithType(dismissType: .flyDown)
+        touchKeyPopup.dismissWithType(dismissType: .flyDown)
     }
     
-    private func handlePinVerificationRequired(completion: @escaping (Bool) -> Void ) {
+    private func handlePinVerificationRequired(completion: @escaping (Bool) -> Void) {
         ensureMainThread {
-            let alert = UIAlertController.userTextInputAlert(title: Strings.pinTitle, message: Strings.pinLabel, placeholder: Strings.pinPlaceholder) {
-                pin, _ in
-                if let pin = pin, !pin.isEmpty {
-                    guard let fido2Service = YubiKitManager.shared.keySession.fido2Service else {
-                        completion(true)
-                        return
-                    }
-                    guard let verifyPinRequest = YKFKeyFIDO2VerifyPinRequest(pin: pin) else {
-                        completion(true)
-                        return
-                    }
-
-                    fido2Service.execute(verifyPinRequest) { (error) in
-                        guard error == nil else {
-                            completion(true)
-                            return
-                        }
-                        completion(false)
-                        return
-                    }
-                } else {
+            self.pinVerificationPopup.addButton(title: Strings.confirmPin) { [weak self] in
+                guard let self = self else {
+                    return .flyDown
+                }
+                return self.verifyPin(completion: completion)
+            }
+            self.pinVerificationPopup.showWithType(showType: .flyUp)
+        }
+    }
+    
+    private func verifyPin(completion: @escaping (Bool) -> Void) -> PopupViewDismissType {
+        if let pin = pinVerificationPopup.text, !pin.isEmpty {
+            guard let fido2Service = YubiKitManager.shared.keySession.fido2Service else {
+                completion(true)
+                return .flyDown
+            }
+            guard let verifyPinRequest = YKFKeyFIDO2VerifyPinRequest(pin: pin) else {
+                completion(true)
+                return .flyDown
+            }
+            
+            fido2Service.execute(verifyPinRequest) { (error) in
+                guard error == nil else {
                     completion(true)
                     return
                 }
+                completion(false)
+                return
             }
-            alert.textFields?.first?.isSecureTextEntry = true
-            (UIApplication.shared.delegate as? AppDelegate)?.browserViewController.present(alert, animated: true)
+        } else {
+            completion(true)
+        }
+        return .flyDown
+    }
+    
+    private func cleanupPinVerificationPopup() {
+        ensureMainThread {
+            self.pinVerificationPopup.removeButtonAtIndex(buttonIndex: 1)
+            self.pinVerificationPopup.clearTextField()
         }
     }
     
@@ -661,6 +709,7 @@ class U2FExtensions: NSObject {
         }
         fido2AuthHandles.remove(at: index)
         fido2AuthRequest.removeValue(forKey: handle)
+        u2fActive = false
     }
     
     // FIDO Registration
@@ -773,6 +822,7 @@ class U2FExtensions: NSObject {
         fidoRegHandles.remove(at: index)
         fidoRegisterRequest.removeValue(forKey: handle)
         requestId.removeValue(forKey: handle)
+        u2fActive = false
     }
     
     // FIDO Authetication
@@ -903,6 +953,7 @@ class U2FExtensions: NSObject {
         fidoSignHandles.remove(at: index)
         fidoSignRequests.removeValue(forKey: handle)
         requestId.removeValue(forKey: handle)
+        u2fActive = false
     }
     
     private func handleSessionStateChange() {
@@ -914,6 +965,8 @@ class U2FExtensions: NSObject {
         }
         let sessionState = YubiKitManager.shared.keySession.sessionState
         if sessionState == .open { // The key session is ready to be used.
+            insertKeyPopup.dismissWithType(dismissType: .flyDown)
+            
             if !fido2RegHandles.isEmpty {
                 guard let handle = fido2RegHandles.first else {
                     log.error(U2FErrorMessages.ErrorRegistration)
@@ -961,6 +1014,13 @@ class U2FExtensions: NSObject {
                 }
                 handleFIDOAuthentication(handle: handle, keys: keys, requestId: requestId[handle] ?? -1)
             }
+        } else {
+            if u2fActive == true {
+                insertKeyPopup.showWithType(showType: .flyUp)
+            }
+            cleanupPinVerificationPopup()
+            touchKeyPopup.dismissWithType(dismissType: .flyDown)
+            pinVerificationPopup.dismissWithType(dismissType: .flyDown)
         }
     }
 }
@@ -981,6 +1041,11 @@ extension U2FExtensions: TabContentScript {
             guard let name = body["name"] as? String, let handle = body["handle"] as? Int else {
                 log.error(U2FErrorMessages.Error)
                 return
+            }
+            
+            u2fActive = true
+            if YubiKitManager.shared.keySession.sessionState != .open {
+                insertKeyPopup.showWithType(showType: .flyUp)
             }
             
             switch name {
@@ -1079,6 +1144,7 @@ extension U2FExtensions: TabContentScript {
                         log.error(error.localizedDescription)
                     }
                 default:
+                    insertKeyPopup.dismissWithType(dismissType: .flyDown)
                     log.error(U2FErrorMessages.Error)
             }
         }
@@ -1092,9 +1158,10 @@ extension Strings {
     public static let U2FAuthenticationError = NSLocalizedString("U2FAuthenticationError", tableName: "BraveShared", bundle: Bundle.braveShared, value: "Error authenticating your security key", comment: "Error handling U2F authentication.") + tryAgain
     
     //Lightning Modals
-    public static let touchKeyTitle = NSLocalizedString("touchKeyTitle", bundle: Bundle.shared, value: "Use the security key for ", comment: "Title for touch key modal.")
-    public static let touchKeyMessage = NSLocalizedString("touchKeyMessage", bundle: Bundle.shared, value: "Insert your security key and touch it.", comment: "Message for touch key modal.")
-    public static let touchKeyCancel = NSLocalizedString("touchKeyCancel", bundle: Bundle.shared, value: "Cancel", comment: "Text for touch key modal button.")
+    public static let keyTitle = NSLocalizedString("touchKeyTitle", bundle: Bundle.shared, value: "Use the security key for ", comment: "Title for touch key modal.")
+    public static let touchKeyMessage = NSLocalizedString("touchKeyMessage", bundle: Bundle.shared, value: "Interact with the security key.", comment: "Message for touch key modal.")
+    public static let insertKeyMessage = NSLocalizedString("insertKeyMessage", bundle: Bundle.shared, value: "Insert your security key.", comment: "Message for touch key modal.")
+    public static let keyCancel = NSLocalizedString("touchKeyCancel", bundle: Bundle.shared, value: "Cancel", comment: "Text for touch key modal button.")
     
     //PIN
     public static let pinTitle = NSLocalizedString("pinTitle", bundle: Bundle.shared, value: "PIN Required", comment: "Title for the alert modal when a security key with PIN is inserted.")
