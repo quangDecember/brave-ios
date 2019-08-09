@@ -237,6 +237,14 @@ class U2FExtensions: NSObject {
     }
     
     override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        
+        observeSessionStateUpdates = false
+        observeKeyStateUpdates = false
+        defer {
+            observeSessionStateUpdates = true
+            observeKeyStateUpdates = true
+        }
+        
         guard context == &U2FExtensions.observationContext else {
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
             return
@@ -450,13 +458,13 @@ class U2FExtensions: NSObject {
     }
     
     private func cleanupFIDO2Registration(handle: Int) {
+        u2fActive = false
         guard let index = fido2RegHandles.firstIndex(of: handle) else {
             log.error(U2FErrorMessages.ErrorRegistration)
             return
         }
         fido2RegHandles.remove(at: index)
         fido2RegisterRequest.removeValue(forKey: handle)
-        u2fActive = false
     }
     
     // FIDO2 Authentication
@@ -634,13 +642,6 @@ class U2FExtensions: NSObject {
     
     // This modal is presented when the key bootstrap is complete
     private func presentInteractWithKeyModal() {
-        observeSessionStateUpdates = false
-        observeKeyStateUpdates = false
-        defer {
-            observeSessionStateUpdates = true
-            observeKeyStateUpdates = true
-        }
-        
         guard let fido2Service = YubiKitManager.shared.keySession.fido2Service else {
             return
         }
@@ -703,13 +704,13 @@ class U2FExtensions: NSObject {
     }
     
     private func cleanupFIDO2Authentication(handle: Int) {
+        u2fActive = false
         guard let index = fido2AuthHandles.firstIndex(of: handle) else {
             log.error(U2FErrorMessages.ErrorRegistration)
             return
         }
         fido2AuthHandles.remove(at: index)
         fido2AuthRequest.removeValue(forKey: handle)
-        u2fActive = false
     }
     
     // FIDO Registration
@@ -815,6 +816,7 @@ class U2FExtensions: NSObject {
     }
     
     private func cleanupFIDORegistration(handle: Int) {
+        u2fActive = false
         guard let index = fidoRegHandles.firstIndex(of: handle) else {
             log.error(U2FErrorMessages.ErrorRegistration)
             return
@@ -822,7 +824,6 @@ class U2FExtensions: NSObject {
         fidoRegHandles.remove(at: index)
         fidoRegisterRequest.removeValue(forKey: handle)
         requestId.removeValue(forKey: handle)
-        u2fActive = false
     }
     
     // FIDO Authetication
@@ -946,6 +947,7 @@ class U2FExtensions: NSObject {
     }
     
     private func cleanupFIDOAuthentication(handle: Int) {
+        u2fActive = false
         guard let index = fidoSignHandles.firstIndex(of: handle) else {
             log.error(U2FErrorMessages.ErrorRegistration)
             return
@@ -953,16 +955,9 @@ class U2FExtensions: NSObject {
         fidoSignHandles.remove(at: index)
         fidoSignRequests.removeValue(forKey: handle)
         requestId.removeValue(forKey: handle)
-        u2fActive = false
     }
     
     private func handleSessionStateChange() {
-        observeSessionStateUpdates = false
-        observeKeyStateUpdates = false
-        defer {
-            observeSessionStateUpdates = true
-            observeKeyStateUpdates = true
-        }
         let sessionState = YubiKitManager.shared.keySession.sessionState
         if sessionState == .open { // The key session is ready to be used.
             insertKeyPopup.dismissWithType(dismissType: .flyDown)
@@ -1016,7 +1011,7 @@ class U2FExtensions: NSObject {
             }
         } else {
             if u2fActive == true {
-                insertKeyPopup.showWithType(showType: .flyUp)
+                presentInsertKeyModal()
             }
             cleanupPinVerificationPopup()
             touchKeyPopup.dismissWithType(dismissType: .flyDown)
@@ -1045,7 +1040,7 @@ extension U2FExtensions: TabContentScript {
             
             u2fActive = true
             if YubiKitManager.shared.keySession.sessionState != .open {
-                insertKeyPopup.showWithType(showType: .flyUp)
+                presentInsertKeyModal()
             }
             
             switch name {
